@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { findLeakedSecrets } from '../../src/lib/env.ts'
 
 const SeedEnvSchema = z
   .object({
@@ -18,7 +19,7 @@ export type SeedEnv = z.infer<typeof SeedEnvSchema>
  * в клиентский бандл, поэтому такая переменная — ошибка, даже если seed она не нужна.
  */
 export function parseSeedEnv(env: Record<string, string | undefined>): SeedEnv {
-  const leaked = Object.keys(env).filter((key) => key.startsWith('VITE_') && /SERVICE_ROLE|SECRET/.test(key))
+  const leaked = findLeakedSecrets(env)
   if (leaked.length > 0) {
     throw new Error(`Секретный ключ не должен иметь префикс VITE_: ${leaked.join(', ')}`)
   }
