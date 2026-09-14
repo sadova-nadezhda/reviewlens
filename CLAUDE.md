@@ -26,6 +26,7 @@ AI-анализ отзывов клиентов: загрузка отзывов
 - `src/features/<фича>/` — всё, что относится к фиче: компоненты, хуки, запросы (`api.ts`), схемы Zod (`schema.ts`)
 - `src/components/ui/` — компоненты shadcn/ui, не редактировать без необходимости
 - `src/lib/` — клиент Supabase, утилиты
+- `src/hooks/` — общие хуки, не привязанные к фиче
 - `supabase/migrations/` — SQL-миграции
 - `supabase/functions/` — Edge Functions
 - `scripts/` — Node-скрипты
