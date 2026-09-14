@@ -1,75 +1,101 @@
-# React + TypeScript + Vite
+# ReviewLens
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+AI-анализ отзывов клиентов: загрузка отзывов из CSV, определение тональности и темы через LLM, таблица с фильтрами и дашборд.
 
-Currently, two official plugins are available:
+## База данных
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Схема и политики — в `supabase/migrations/`. Проект Supabase облачный, Docker не используется.
 
-## React Compiler
+- `npx supabase db push --linked --dry-run` — показать, какие миграции будут применены
+- `npx supabase db push --linked` — применить миграции
+- `npm run db:types` — сгенерировать `src/lib/database.types.ts` после изменения схемы
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Проверка политик RLS
 
-## Expanding the ESLint configuration
+Автотестов политик нет (pgTAP требует локальный Supabase). Проверяйте вручную в SQL Editor облачного проекта после каждой миграции, которая меняет таблицы, политики или права.
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+### Подготовка
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+1. Создайте двух пользователей в Authentication → Users и подставьте их id вместо `<USER_A>` и `<USER_B>`.
+2. Каждый сценарий выполняйте в отдельной транзакции: ошибка прерывает транзакцию, а `rollback` убирает тестовые данные.
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+Шаблон транзакции:
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```sql
+begin;
 
+-- Данные создаются от имени postgres: RLS и права на колонки не действуют
+insert into public.datasets (id, owner_id, name, is_demo) values
+  ('11111111-1111-1111-1111-111111111111', null, 'Демо', true),
+  ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', '<USER_A>', 'Датасет A', false),
+  ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', '<USER_B>', 'Датасет B', false);
+
+insert into public.reviews (dataset_id, body) values
+  ('11111111-1111-1111-1111-111111111111', 'Демо-отзыв'),
+  ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Отзыв A'),
+  ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'Отзыв B');
+
+-- Действовать как пользователь A
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"<USER_A>","role":"authenticated"}', true);
+
+-- Или как анонимный посетитель
+-- set local role anon;
+-- select set_config('request.jwt.claims', '{"role":"anon"}', true);
+
+-- Запрос сценария
+
+rollback;
 ```
 
-You can also install [eslint-plugin-react-x](https://npmx.dev/package/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://npmx.dev/package/eslint-plugin-react-dom) for React-specific lint rules:
+### Сценарии
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+Коды ошибок: `42501` — нет прав или нарушена политика RLS, `23514` — нарушено ограничение.
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+**Чтение**
 
-```
+| # | Роль | Запрос | Ожидается |
+|---|---|---|---|
+| 1 | anon | `select name from datasets;` | только «Демо» |
+| 2 | anon | `select body from reviews;` | только «Демо-отзыв» |
+| 3 | A | `select name from datasets;` | «Демо» и «Датасет A», без «Датасет B» |
+| 4 | A | `select body from reviews;` | «Демо-отзыв» и «Отзыв A» |
+
+**Запись: anon**
+
+| # | Запрос | Ожидается |
+|---|---|---|
+| 5 | `insert into datasets (name) values ('x');` | `42501 permission denied` |
+
+**Запись: пользователь A, свои данные**
+
+| # | Запрос | Ожидается |
+|---|---|---|
+| 6 | `insert into datasets (name) values ('Новый') returning owner_id;` | успех, `owner_id` = A |
+| 7 | `insert into datasets (name, owner_id) values ('x', '<USER_B>');` | `42501 permission denied` (колонка не разрешена) |
+| 8 | `update datasets set is_demo = true where id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';` | `42501 permission denied` |
+| 9 | `update datasets set reviews_count = 0 where id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';` | `42501 permission denied` |
+| 10 | `update reviews set sentiment = 'positive';` | `42501 permission denied` (результаты анализа пишет только service_role) |
+| 11 | `update reviews set dataset_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';` | `42501 permission denied` |
+
+**Запись: пользователь A, чужие и демо-данные**
+
+| # | Запрос | Ожидается |
+|---|---|---|
+| 12 | `insert into reviews (dataset_id, body) values ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'x');` | `42501 new row violates row-level security policy` |
+| 13 | `insert into reviews (dataset_id, body) values ('11111111-1111-1111-1111-111111111111', 'x');` | `42501 new row violates row-level security policy` |
+| 14 | `update datasets set name = 'x' where id in ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', '11111111-1111-1111-1111-111111111111');` | `UPDATE 0`, без ошибки |
+| 15 | `delete from reviews where dataset_id <> 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';` | `DELETE 0`, без ошибки |
+
+### Счётчики и лимиты
+
+Роль указана для запроса сценария; подготовка данных всегда идёт от postgres.
+
+| # | Роль | Запрос | Ожидается |
+|---|---|---|---|
+| 16 | A | `insert into reviews (dataset_id, body) values ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'x'), ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'y');` затем `delete from reviews where body = 'x';` затем `select reviews_count from datasets where id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';` | `2` |
+| 17 | postgres | `update reviews set analysis_status = 'done', sentiment = 'positive', topic = 'delivery' where body = 'Отзыв A';` затем `select analyzed_count from datasets where id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';` | `1` |
+| 18 | A | `insert into datasets (name) select 'x' || g from generate_series(1, 20) g;` | `23514 Нельзя создать больше 20 датасетов` (у A уже есть один) |
+| 19 | postgres | `insert into reviews (dataset_id, body) select 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'x' from generate_series(1, 20000);` | `23514 ... violates check constraint "datasets_reviews_limit"`, ни одна строка не вставлена |
+
+Удалять отзывы можно только через `DELETE`: `TRUNCATE` не вызывает триггеры, и счётчики разойдутся с реальным числом строк.
